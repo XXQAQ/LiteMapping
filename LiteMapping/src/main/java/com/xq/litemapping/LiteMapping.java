@@ -29,7 +29,7 @@ public class LiteMapping {
     private final InnerHelper innerHelper;
 
     public LiteMapping(Context context, String path, String autoPrimaryKeyName, Map<String,Class<?>> otherKeyMap, int version){
-        this(context,path,true,new Pair<String,Class<?>>(autoPrimaryKeyName,Integer.class),otherKeyMap,version);
+        this(context,path,true,new Pair<String,Class<?>>(autoPrimaryKeyName,Long.class),otherKeyMap,version);
     }
 
     public LiteMapping(Context context, String path, Pair<String,Class<?>> primaryKeyPair, Map<String,Class<?>> otherKeyMap, int version){
@@ -208,6 +208,10 @@ public class LiteMapping {
         }
     }
 
+    public void clear(){
+        innerHelper.getWritableDatabase().delete(tableName,null,null);
+    }
+
     public boolean update(Object id, Map<String,?> columns){
         //
         ContentValues contentValues = new ContentValues();
@@ -239,11 +243,11 @@ public class LiteMapping {
         }
     }
 
-    public List<?> queryId(){
+    public <T> List<T> queryId(){
         return queryId(new QueryArgument());
     }
 
-    public List<?> queryId(QueryArgument queryArgument){
+    public <T> List<T> queryId(QueryArgument queryArgument){
         Pair<String,String[]> selectionPair = conditionToSelection(queryArgument.getConditions(),queryArgument.getConditionLink());
         return queryIdListByCursor(innerHelper.getReadableDatabase().query(tableName,new String[]{primaryKeyName},selectionPair.first,selectionPair.second,null,null,orderColumnAndReverseToOrderBy(queryArgument.getOrderColumn(),queryArgument.isReverse()),pageAndSizeToLimit(queryArgument.getPage(),queryArgument.getPageSize())));
     }
@@ -320,6 +324,19 @@ public class LiteMapping {
             return orderColumn;
         }
         return String.format("%s %s",orderColumn,reverse?"desc":"asc");
+    }
+
+    public boolean containByQueryArgument(QueryArgument queryArgument){
+        Cursor cursor = null;
+        try {
+            Pair<String,String[]> selectionPair = conditionToSelection(queryArgument.getConditions(),queryArgument.getConditionLink());
+            cursor = innerHelper.getReadableDatabase().query(tableName, new String[]{"*"}, selectionPair.first, selectionPair.second, null, null, orderColumnAndReverseToOrderBy(queryArgument.getOrderColumn(), queryArgument.isReverse()), pageAndSizeToLimit(queryArgument.getPage(), queryArgument.getPageSize()));
+            return cursor.getCount() > 0;
+        } finally {
+            if (cursor != null){
+                cursor.close();
+            }
+        }
     }
 
     public boolean contain(Object id){
@@ -419,11 +436,11 @@ public class LiteMapping {
         return true;
     }
 
-    private List<?> queryIdListByCursor(Cursor cursor){
+    private <T> List<T> queryIdListByCursor(Cursor cursor){
         try {
-            List<Object> list = new ArrayList<>(cursor.getCount());
+            List<T> list = new ArrayList<>(cursor.getCount());
             while (cursor.moveToNext()){
-                list.add(getValueFromCursor(cursor,primaryKeyName,cursor.getColumnIndex(primaryKeyName)).second);
+                list.add((T) getValueFromCursor(cursor,primaryKeyName,cursor.getColumnIndex(primaryKeyName)).second);
             }
             return list;
         } finally {
