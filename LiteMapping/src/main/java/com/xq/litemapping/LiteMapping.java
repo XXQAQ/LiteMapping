@@ -26,17 +26,21 @@ public class LiteMapping {
 
     private final Map<String,Class<?>> allKeyMap = new LinkedHashMap<>();
 
-    private final InnerHelper innerHelper;
+    private final SQLiteOpenHelper innerHelper;
 
-    public LiteMapping(Context context, String path, String autoPrimaryKeyName, Map<String,Class<?>> otherKeyMap, int version){
-        this(context,path,true,new Pair<String,Class<?>>(autoPrimaryKeyName,Long.class),otherKeyMap,version);
+    public LiteMapping(Context context, String path, String autoPrimaryKeyName, Map<String,Class<?>> otherKeyMap){
+        this(context,path,true,new Pair<String,Class<?>>(autoPrimaryKeyName,Long.class),otherKeyMap);
     }
 
-    public LiteMapping(Context context, String path, Pair<String,Class<?>> primaryKeyPair, Map<String,Class<?>> otherKeyMap, int version){
-        this(context,path,false,primaryKeyPair,otherKeyMap,version);
+    public LiteMapping(Context context, String path, Pair<String,Class<?>> primaryKeyPair, Map<String,Class<?>> otherKeyMap){
+        this(context,path,false,primaryKeyPair,otherKeyMap);
     }
 
-    public LiteMapping(Context context, String path, boolean autoincrement, Pair<String,Class<?>> primaryKeyPair, Map<String,Class<?>> otherKeyMap, int version){
+    public LiteMapping(Context context, String path, boolean autoincrement, Pair<String,Class<?>> primaryKeyPair, Map<String,Class<?>> otherKeyMap){
+        this(context,new SqliteHelperPool(),path,autoincrement,primaryKeyPair,otherKeyMap);
+    }
+
+    public LiteMapping(Context context, SqliteHelperPool sqliteHelperPool, String path, boolean autoincrement, Pair<String,Class<?>> primaryKeyPair, Map<String,Class<?>> otherKeyMap){
 
         String[] array = path.split("/");
         this.dbName = array[0];
@@ -47,7 +51,7 @@ public class LiteMapping {
         this.allKeyMap.put(primaryKeyPair.first,primaryKeyPair.second);
         this.allKeyMap.putAll(otherKeyMap);
 
-        this.innerHelper = new InnerHelper(context,version,autoincrement,primaryKeyPair,otherKeyMap);
+        this.innerHelper = sqliteHelperPool.getOrCreateHelper(context,dbName,tableName,autoincrement,primaryKeyPair,otherKeyMap);
     }
 
     public boolean insertById(Object id){
@@ -527,27 +531,47 @@ public class LiteMapping {
         Blob,
     }
 
-    private class InnerHelper extends SQLiteOpenHelper {
+    public static class SqliteHelperPool{
+
+        private final Map<String,InnerHelper> sqliteHelperMap = new HashMap<>();
+
+        public InnerHelper getOrCreateHelper(Context context, String dbName, String tableName, boolean autoincrement, Pair<String,Class<?>> primaryKeyPair,  Map<String,Class<?>> otherKeyMap){
+            InnerHelper helper;
+            if (sqliteHelperMap.containsKey(dbName)){
+                helper = sqliteHelperMap.get(dbName);
+            } else {
+                helper = new InnerHelper(context, dbName);
+                sqliteHelperMap.put(dbName,helper);
+            }
+            helper.createOrUpdateTable(helper.getWritableDatabase(),tableName,autoincrement,primaryKeyPair,otherKeyMap);
+            return helper;
+        }
+
+    }
+
+    private static class InnerHelper extends SQLiteOpenHelper {
 
         private final Context context;
 
+        private final String dbName;
+
         private final String KEY_ALL_COLUMN = "AllColumn";
 
-        private final boolean autoincrement;
-        private final Pair<String,Class<?>> primaryKeyPair;
-        private final Map<String,Class<?>> otherKeyMap;
-
-        public InnerHelper(Context context,int version,boolean autoincrement,Pair<String,Class<?>> primaryKeyPair,Map<String,Class<?>> otherKeyMap) {
-            super(context,dbName+".db",null,version);
+        public InnerHelper(Context context,String dbName) {
+            super(context,dbName+".db",null,1);
             this.context = context;
-            this.autoincrement = autoincrement;
-            this.primaryKeyPair = primaryKeyPair;
-            this.otherKeyMap = otherKeyMap;
+            this.dbName = dbName;
         }
 
-        @Override
-        public void onCreate(SQLiteDatabase db) {
+        private void createOrUpdateTable(SQLiteDatabase db,String tableName,boolean autoincrement,Pair<String,Class<?>> primaryKeyPair,Map<String,Class<?>> otherKeyMap){
+            if (!context.getSharedPreferences(getSPName(tableName),Context.MODE_PRIVATE).contains(KEY_ALL_COLUMN)){
+                createTable(db,tableName,autoincrement,primaryKeyPair,otherKeyMap);
+            } else {
+                updateTable(db,tableName,otherKeyMap);
+            }
+        }
 
+        private void createTable(SQLiteDatabase db,String tableName,boolean autoincrement,Pair<String,Class<?>> primaryKeyPair,Map<String,Class<?>> otherKeyMap){
             StringBuilder stringBuilder = new StringBuilder();
             stringBuilder.append(primaryKeyPair.first);
             stringBuilder.append(" ");
@@ -569,7 +593,27 @@ public class LiteMapping {
 
             db.execSQL(String.format("create table if not exists %s (%s);", tableName,stringBuilder));
 
-            context.getSharedPreferences(getSPName(),Context.MODE_PRIVATE).edit().putStringSet(KEY_ALL_COLUMN,otherKeyMap.keySet()).apply();
+            context.getSharedPreferences(getSPName(tableName),Context.MODE_PRIVATE).edit().putStringSet(KEY_ALL_COLUMN,otherKeyMap.keySet()).apply();
+        }
+
+        private void updateTable(SQLiteDatabase db,String tableName,Map<String,Class<?>> otherKeyMap){
+            Set<String> oldList = context.getSharedPreferences(getSPName(tableName),Context.MODE_PRIVATE).getStringSet(KEY_ALL_COLUMN,new LinkedHashSet<String>());
+            Set<String> newList = otherKeyMap.keySet();
+            //新增的列
+            Set<String> addColumnList = new LinkedHashSet<>(newList);
+            addColumnList.removeAll(oldList);
+            for (String key:addColumnList){
+                db.execSQL(String.format("alter table %s add column %s %s",tableName,key,getClassTypeInSQL(otherKeyMap.get(key))));
+            }
+            //由于Sqlite不支持删除列，以下代码暂时未实现
+//                //移除的列
+//                Set<String> dropColumnList = new LinkedHashSet<>(oldList);
+//                dropColumnList.removeAll(newList);
+//                for (String key:dropColumnList){
+//                    db.execSQL(String.format("alter table %s drop column %s",tableName,key));
+//                }
+            //写入最新列信息
+            context.getSharedPreferences(getSPName(tableName),Context.MODE_PRIVATE).edit().putStringSet(KEY_ALL_COLUMN,otherKeyMap.keySet()).apply();
         }
 
         private final Map<Class<?>,String> classTypeMap = new HashMap<>();{
@@ -604,29 +648,17 @@ public class LiteMapping {
         }
 
         @Override
-        public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-            if (newVersion > oldVersion){
-                Set<String> oldList = context.getSharedPreferences(getSPName(),Context.MODE_PRIVATE).getStringSet(KEY_ALL_COLUMN,new LinkedHashSet<String>());
-                Set<String> newList = otherKeyMap.keySet();
-                //新增的列
-                Set<String> addColumnList = new LinkedHashSet<>(newList);
-                addColumnList.removeAll(oldList);
-                for (String key:addColumnList){
-                    db.execSQL(String.format("alter table %s add column %s %s",tableName,key,getClassTypeInSQL(otherKeyMap.get(key))));
-                }
-                //由于Sqlite不支持删除列，以下代码暂时未实现
-//                //移除的列
-//                Set<String> dropColumnList = new LinkedHashSet<>(oldList);
-//                dropColumnList.removeAll(newList);
-//                for (String key:dropColumnList){
-//                    db.execSQL(String.format("alter table %s drop column %s",tableName,key));
-//                }
-                //写入最新列信息
-                context.getSharedPreferences(getSPName(),Context.MODE_PRIVATE).edit().putStringSet(KEY_ALL_COLUMN,otherKeyMap.keySet()).apply();
-            }
+        public void onCreate(SQLiteDatabase db) {
+
+
         }
 
-        private String getSPName(){
+        @Override
+        public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+
+        }
+
+        private String getSPName(String tableName){
             return dbName + "."  + tableName;
         }
 
